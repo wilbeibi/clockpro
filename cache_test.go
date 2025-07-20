@@ -22,9 +22,9 @@ func TestNew(t *testing.T) {
 			if cache == nil {
 				t.Fatal("New() returned nil")
 			}
-			if cache.state.capacity != tt.expected {
+			if cache.clock.capacity != tt.expected {
 				t.Errorf("New(%d) capacity = %d, want %d",
-					tt.size, cache.state.capacity, tt.expected)
+					tt.size, cache.clock.capacity, tt.expected)
 			}
 		})
 	}
@@ -33,18 +33,15 @@ func TestNew(t *testing.T) {
 func TestCacheBasicOperations(t *testing.T) {
 	cache := New[interface{}, interface{}](3)
 
-	// Test Get on empty cache
 	if val, ok := cache.Get("key1"); ok {
 		t.Errorf("Get on empty cache returned ok=true, val=%v", val)
 	}
 
-	// Test Put and Get
 	cache.Put("key1", "value1")
 	if val, ok := cache.Get("key1"); !ok || val != "value1" {
 		t.Errorf("Get after Put: got (%v, %v), want (value1, true)", val, ok)
 	}
 
-	// Test update existing key
 	cache.Put("key1", "newvalue1")
 	if val, ok := cache.Get("key1"); !ok || val != "newvalue1" {
 		t.Errorf("Get after update: got (%v, %v), want (newvalue1, true)", val, ok)
@@ -52,13 +49,11 @@ func TestCacheBasicOperations(t *testing.T) {
 }
 
 func TestCacheEviction(t *testing.T) {
-	cache := New[interface{}, interface{}](2) // Small cache to force eviction
+	cache := New[interface{}, interface{}](2)
 
-	// Fill cache
 	cache.Put("key1", "value1")
 	cache.Put("key2", "value2")
 
-	// Both should be present
 	if _, ok := cache.Get("key1"); !ok {
 		t.Error("key1 should be present")
 	}
@@ -66,103 +61,88 @@ func TestCacheEviction(t *testing.T) {
 		t.Error("key2 should be present")
 	}
 
-	// Add third item to force eviction
 	cache.Put("key3", "value3")
 
-	// key3 should be present
 	if _, ok := cache.Get("key3"); !ok {
 		t.Error("key3 should be present after insertion")
 	}
 
-	// Check that total resident pages doesn't exceed capacity
-	totalResident := cache.state.hotList.size + cache.state.coldList.size
-	if totalResident > cache.state.capacity {
+	totalResident := cache.clock.hot.size + cache.clock.cold.size
+	if totalResident > cache.clock.capacity {
 		t.Errorf("Total resident pages %d exceeds capacity %d",
-			totalResident, cache.state.capacity)
+			totalResident, cache.clock.capacity)
 	}
 }
 
 func TestHotColdTransitions(t *testing.T) {
 	cache := New[interface{}, interface{}](4)
 
-	// Add items as cold pages initially
 	cache.Put("cold1", "value1")
 	cache.Put("cold2", "value2")
 
-	// Access cold pages multiple times to potentially promote to hot
 	for i := 0; i < 3; i++ {
 		cache.Get("cold1")
 		cache.Get("cold2")
 	}
 
-	// Verify internal state consistency
-	totalPages := len(cache.state.pageMap)
-	listSizes := cache.state.hotList.size + cache.state.coldList.size + cache.state.metaList.size
+	totalPages := len(cache.clock.pageMap)
+	listSizes := cache.clock.hot.size + cache.clock.cold.size + cache.clock.meta.size
 
 	if totalPages != listSizes {
 		t.Errorf("Page map size %d doesn't match list sizes %d", totalPages, listSizes)
 	}
 
-	// Check capacity constraints
-	if cache.state.hotList.size > cache.state.hotCapacity {
+	if cache.clock.hot.size > cache.clock.hotCap {
 		t.Errorf("Hot list size %d exceeds hot capacity %d",
-			cache.state.hotList.size, cache.state.hotCapacity)
+			cache.clock.hot.size, cache.clock.hotCap)
 	}
 
-	residentPages := cache.state.hotList.size + cache.state.coldList.size
-	if residentPages > cache.state.capacity {
+	residentPages := cache.clock.hot.size + cache.clock.cold.size
+	if residentPages > cache.clock.capacity {
 		t.Errorf("Resident pages %d exceed total capacity %d",
-			residentPages, cache.state.capacity)
+			residentPages, cache.clock.capacity)
 	}
 }
 
 func TestSetSize(t *testing.T) {
 	cache := New[interface{}, interface{}](5)
 
-	// Fill cache
 	for i := 0; i < 5; i++ {
 		cache.Put(i, i*10)
 	}
 
-	originalTotal := len(cache.state.pageMap)
+	originalTotal := len(cache.clock.pageMap)
 
-	// Increase size
 	cache.SetSize(10)
-	if cache.state.capacity != 10 {
-		t.Errorf("SetSize(10): capacity = %d, want 10", cache.state.capacity)
+	if cache.clock.capacity != 10 {
+		t.Errorf("SetSize(10): capacity = %d, want 10", cache.clock.capacity)
 	}
 
-	// Decrease size significantly to force evictions
 	cache.SetSize(2)
-	if cache.state.capacity != 2 {
-		t.Errorf("SetSize(2): capacity = %d, want 2", cache.state.capacity)
+	if cache.clock.capacity != 2 {
+		t.Errorf("SetSize(2): capacity = %d, want 2", cache.clock.capacity)
 	}
 
-	// Check that evictions occurred
-	residentPages := cache.state.hotList.size + cache.state.coldList.size
+	residentPages := cache.clock.hot.size + cache.clock.cold.size
 	if residentPages > 2 {
 		t.Errorf("After SetSize(2), resident pages = %d, want <= 2", residentPages)
 	}
 
-	// Verify we can still add items
 	cache.Put("new", "value")
 	if _, ok := cache.Get("new"); !ok {
 		t.Error("Should be able to add items after SetSize")
 	}
 
-	_ = originalTotal // Suppress unused variable warning
+	_ = originalTotal
 }
 
 func TestAdaptiveCapacity(t *testing.T) {
 	cache := New[interface{}, interface{}](10)
 
-	// Record initial hot capacity
-	initialHotCap := cache.state.hotCapacity
+	initialHotCap := cache.clock.hotCap
 
-	// Add many items and access them to trigger adaptation
 	for i := 0; i < 20; i++ {
 		cache.Put(i, i)
-		// Access some items multiple times
 		if i < 10 {
 			for j := 0; j < 3; j++ {
 				cache.Get(i)
@@ -170,31 +150,28 @@ func TestAdaptiveCapacity(t *testing.T) {
 		}
 	}
 
-	// Capacity should still be within bounds
-	if cache.state.hotCapacity < 1 {
+	if cache.clock.hotCap < 1 {
 		t.Error("Hot capacity should be at least 1")
 	}
 
-	if cache.state.hotCapacity >= cache.state.capacity {
+	if cache.clock.hotCap >= cache.clock.capacity {
 		t.Errorf("Hot capacity %d should be less than total capacity %d",
-			cache.state.hotCapacity, cache.state.capacity)
+			cache.clock.hotCap, cache.clock.capacity)
 	}
 
-	if cache.state.hotCapacity+cache.state.coldCapacity != cache.state.capacity {
+	if cache.clock.hotCap+cache.clock.coldCap != cache.clock.capacity {
 		t.Errorf("Hot capacity %d + cold capacity %d should equal total capacity %d",
-			cache.state.hotCapacity, cache.state.coldCapacity, cache.state.capacity)
+			cache.clock.hotCap, cache.clock.coldCap, cache.clock.capacity)
 	}
 
-	_ = initialHotCap // Suppress unused variable warning
+	_ = initialHotCap
 }
 
 func TestConcurrency(t *testing.T) {
 	cache := New[interface{}, interface{}](100)
 
-	// Test basic concurrent access
 	done := make(chan bool, 2)
 
-	// Writer goroutine
 	go func() {
 		for i := 0; i < 50; i++ {
 			cache.Put(i, i*2)
@@ -202,7 +179,6 @@ func TestConcurrency(t *testing.T) {
 		done <- true
 	}()
 
-	// Reader goroutine
 	go func() {
 		for i := 0; i < 50; i++ {
 			cache.Get(i)
@@ -210,30 +186,26 @@ func TestConcurrency(t *testing.T) {
 		done <- true
 	}()
 
-	// Wait for both to complete
 	<-done
 	<-done
 
-	// Verify cache is still in consistent state
-	totalResident := cache.state.hotList.size + cache.state.coldList.size
-	if totalResident > cache.state.capacity {
+	totalResident := cache.clock.hot.size + cache.clock.cold.size
+	if totalResident > cache.clock.capacity {
 		t.Errorf("After concurrent access, resident pages %d exceed capacity %d",
-			totalResident, cache.state.capacity)
+			totalResident, cache.clock.capacity)
 	}
 }
 
 func TestStateTransitions(t *testing.T) {
 	cache := New[interface{}, interface{}](4)
 
-	// Add a page and track its state transitions
 	cache.Put("test", "value")
 
-	page := cache.state.pageMap["test"]
+	page := cache.clock.pageMap["test"]
 	if page == nil {
 		t.Fatal("Page should exist after Put")
 	}
 
-	// Initially should be cold resident with test bit
 	if page.state != stateColdResident {
 		t.Errorf("New page state = %v, want %v", page.state, stateColdResident)
 	}
@@ -242,10 +214,8 @@ func TestStateTransitions(t *testing.T) {
 		t.Error("New page should have test bit set")
 	}
 
-	// Access it to potentially trigger promotion
 	cache.Get("test")
 
-	// Verify state is still valid
 	if page.state != stateHot && page.state != stateColdResident {
 		t.Errorf("Page state after access = %v, should be hot or cold resident", page.state)
 	}
@@ -260,14 +230,12 @@ func TestEdgeCases(t *testing.T) {
 			t.Errorf("Single item cache failed: got (%v, %v)", val, ok)
 		}
 
-		// Add second item, should evict first
 		cache.Put("key2", "value2")
 		if val, ok := cache.Get("key2"); !ok || val != "value2" {
 			t.Errorf("After eviction: got (%v, %v), want (value2, true)", val, ok)
 		}
 
-		// Check total capacity is maintained
-		total := cache.state.hotList.size + cache.state.coldList.size
+		total := cache.clock.hot.size + cache.clock.cold.size
 		if total > 1 {
 			t.Errorf("Capacity 1 cache has %d resident pages", total)
 		}
@@ -276,13 +244,11 @@ func TestEdgeCases(t *testing.T) {
 	t.Run("nil keys and values", func(t *testing.T) {
 		cache := New[interface{}, interface{}](5)
 
-		// nil key should work
 		cache.Put(nil, "value")
 		if val, ok := cache.Get(nil); !ok || val != "value" {
 			t.Errorf("nil key failed: got (%v, %v)", val, ok)
 		}
 
-		// nil value should work
 		cache.Put("key", nil)
 		if val, ok := cache.Get("key"); !ok || val != nil {
 			t.Errorf("nil value failed: got (%v, %v)", val, ok)
@@ -293,7 +259,6 @@ func TestEdgeCases(t *testing.T) {
 func BenchmarkGet(b *testing.B) {
 	cache := New[int, int](1000)
 	
-	// Pre-fill cache
 	for i := 0; i < 1000; i++ {
 		cache.Put(i, i*2)
 	}
@@ -324,7 +289,6 @@ func BenchmarkPut(b *testing.B) {
 func BenchmarkMixed(b *testing.B) {
 	cache := New[int, int](1000)
 	
-	// Pre-fill cache with some data
 	for i := 0; i < 500; i++ {
 		cache.Put(i, i*2)
 	}
@@ -333,9 +297,9 @@ func BenchmarkMixed(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		key := 0
 		for pb.Next() {
-			if key%10 < 7 { // 70% reads
+			if key%10 < 7 {
 				cache.Get(key % 1000)
-			} else { // 30% writes
+			} else {
 				cache.Put(key, key*2)
 			}
 			key++
@@ -346,7 +310,6 @@ func BenchmarkMixed(b *testing.B) {
 func BenchmarkGetSequential(b *testing.B) {
 	cache := New[int, int](1000)
 	
-	// Pre-fill cache
 	for i := 0; i < 1000; i++ {
 		cache.Put(i, i*2)
 	}
