@@ -289,3 +289,79 @@ func TestEdgeCases(t *testing.T) {
 		}
 	})
 }
+
+func BenchmarkGet(b *testing.B) {
+	cache := New[int, int](1000)
+	
+	// Pre-fill cache
+	for i := 0; i < 1000; i++ {
+		cache.Put(i, i*2)
+	}
+	
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		key := 0
+		for pb.Next() {
+			cache.Get(key % 1000)
+			key++
+		}
+	})
+}
+
+func BenchmarkPut(b *testing.B) {
+	cache := New[int, int](1000)
+	
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		key := 0
+		for pb.Next() {
+			cache.Put(key, key*2)
+			key++
+		}
+	})
+}
+
+func BenchmarkMixed(b *testing.B) {
+	cache := New[int, int](1000)
+	
+	// Pre-fill cache with some data
+	for i := 0; i < 500; i++ {
+		cache.Put(i, i*2)
+	}
+	
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		key := 0
+		for pb.Next() {
+			if key%10 < 7 { // 70% reads
+				cache.Get(key % 1000)
+			} else { // 30% writes
+				cache.Put(key, key*2)
+			}
+			key++
+		}
+	})
+}
+
+func BenchmarkGetSequential(b *testing.B) {
+	cache := New[int, int](1000)
+	
+	// Pre-fill cache
+	for i := 0; i < 1000; i++ {
+		cache.Put(i, i*2)
+	}
+	
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cache.Get(i % 1000)
+	}
+}
+
+func BenchmarkPutSequential(b *testing.B) {
+	cache := New[int, int](1000)
+	
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cache.Put(i, i*2)
+	}
+}

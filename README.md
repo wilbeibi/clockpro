@@ -65,18 +65,20 @@ cache.SetSize(newCapacity)
 
 ## Performance
 
-Benchmarks show competitive performance with traditional LRU:
+Benchmarks on Apple M2 (darwin/arm64):
 
-| Operation | Throughput | Latency |
-|-----------|------------|---------|
-| Get | ~40M ops/sec | ~30 ns |
-| Put | ~15M ops/sec | ~75 ns |
-| Mixed (70/30) | ~18M ops/sec | ~77 ns |
+| Operation | Throughput | Latency | Memory/op |
+|-----------|------------|---------|-----------|
+| Get (concurrent) | ~8.9M ops/sec | ~115 ns | 0 B |
+| Put (concurrent) | ~6.1M ops/sec | ~200 ns | 63 B |
+| Mixed 70/30 (concurrent) | ~8.7M ops/sec | ~137 ns | 19 B |
+| Get (sequential) | ~48.8M ops/sec | ~26 ns | 0 B |
+| Put (sequential) | ~13.5M ops/sec | ~81 ns | 64 B |
 
 Run benchmarks:
 
 ```bash
-go test -bench=.
+go test -bench=. -benchmem
 ```
 
 ## Algorithm
