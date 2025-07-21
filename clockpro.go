@@ -1,5 +1,7 @@
 package clockpro
 
+import "container/list"
+
 type pageState int
 
 const (
@@ -9,67 +11,90 @@ const (
 )
 
 type page[K comparable, V any] struct {
-	key   K
-	value V
-	state pageState
-	ref   bool
-	test  bool
-	next  *page[K, V]
-	prev  *page[K, V]
+	key    K
+	value  V
+	state  pageState
+	ref    bool          // reference bit
+	test   bool          // test bit for cold pages
+	listID int           // which list this page belongs to (0=H, 1=R, 2=M)
+	elem   *list.Element // pointer to element in container/list for O(1) removal
 }
 
-type ring[K comparable, V any] struct {
-	head *page[K, V]
-	size int
+// circularList wraps a container/list.List and tracks a hand (current element)
+// to support CLOCK-style scans. We keep a cached size to avoid O(n) Len calls
+// on every mutation (Len is O(1) but we mirror previous struct semantics).
+type circularList[K comparable, V any] struct {
+	l    *list.List    // underlying list; elements hold *page[K,V]
+	hand *list.Element // current CLOCK hand; nil means list is empty
+	size int           // mirrored size for convenience
 }
 
-func newRing[K comparable, V any]() *ring[K, V] {
-	return &ring[K, V]{}
+func newCircularList[K comparable, V any]() *circularList[K, V] {
+	return &circularList[K, V]{l: list.New()}
 }
 
-func (r *ring[K, V]) insert(p *page[K, V]) {
-	if r.size == 0 {
-		p.next = p
-		p.prev = p
-		r.head = p
+// insert pushes page just after the hand (or to front if list empty).
+func (cl *circularList[K, V]) insert(p *page[K, V]) {
+	var elem *list.Element
+	if cl.hand == nil {
+		// Empty list – push and make hand point to it.
+		elem = cl.l.PushFront(p)
+		cl.hand = elem
 	} else {
-		p.next = r.head.next
-		p.prev = r.head
-		r.head.next.prev = p
-		r.head.next = p
-	}
-	r.size++
-}
-
-func (r *ring[K, V]) remove(p *page[K, V]) {
-	if r.size == 1 {
-		r.head = nil
-	} else {
-		if r.head == p {
-			r.head = p.next
+		// Insert after hand for similar behaviour to original code.
+		next := cl.hand.Next()
+		if next == nil {
+			elem = cl.l.PushBack(p)
+		} else {
+			elem = cl.l.InsertBefore(p, next)
 		}
-		p.prev.next = p.next
-		p.next.prev = p.prev
 	}
-	p.next = nil
-	p.prev = nil
-	r.size--
+	p.elem = elem
+	cl.size++
 }
 
-func (r *ring[K, V]) hand() *page[K, V] {
-	return r.head
+// remove removes page p from the list in O(1).
+func (cl *circularList[K, V]) remove(p *page[K, V]) {
+	if p.elem == nil {
+		return
+	}
+	// Adjust hand if it points to the element being removed.
+	if cl.hand == p.elem {
+		cl.hand = cl.hand.Next()
+		if cl.hand == nil {
+			cl.hand = cl.l.Front()
+		}
+	}
+	cl.l.Remove(p.elem)
+	p.elem = nil
+	cl.size--
+	if cl.size == 0 {
+		cl.hand = nil
+	}
 }
 
-func (r *ring[K, V]) advance() {
-	if r.head != nil {
-		r.head = r.head.next
+// moveHand advances the hand pointer to the next position (wraps around).
+func (cl *circularList[K, V]) moveHand() {
+	if cl.hand != nil {
+		cl.hand = cl.hand.Next()
+		if cl.hand == nil {
+			cl.hand = cl.l.Front()
+		}
 	}
+}
+
+// head returns the *page[K,V] currently under the hand (nil if list empty).
+func (cl *circularList[K, V]) head() *page[K, V] {
+	if cl.hand == nil {
+		return nil
+	}
+	return cl.hand.Value.(*page[K, V])
 }
 
 type clock[K comparable, V any] struct {
-	hot      *ring[K, V]
-	cold     *ring[K, V]
-	meta     *ring[K, V]
+	hot      *circularList[K, V]
+	cold     *circularList[K, V]
+	meta     *circularList[K, V]
 	pageMap  map[K]*page[K, V]
 	capacity int
 	hotCap   int
@@ -89,9 +114,9 @@ func newClock[K comparable, V any](capacity int) *clock[K, V] {
 	coldCap := capacity - hotCap
 
 	return &clock[K, V]{
-		hot:      newRing[K, V](),
-		cold:     newRing[K, V](),
-		meta:     newRing[K, V](),
+		hot:      newCircularList[K, V](),
+		cold:     newCircularList[K, V](),
+		meta:     newCircularList[K, V](),
 		pageMap:  make(map[K]*page[K, V]),
 		capacity: capacity,
 		hotCap:   hotCap,
@@ -150,11 +175,11 @@ func (c *clock[K, V]) evictCold() *page[K, V] {
 	maxSteps := c.cold.size * 2
 
 	for c.cold.size > 0 && steps < maxSteps {
-		victim := c.cold.hand()
+		victim := c.cold.head()
 		if victim == nil {
 			break
 		}
-		c.cold.advance()
+		c.cold.moveHand()
 		steps++
 
 		if victim.ref {
@@ -187,18 +212,18 @@ func (c *clock[K, V]) evictHot() *page[K, V] {
 	maxSteps := c.hot.size * 2
 
 	for c.hot.size > 0 && steps < maxSteps {
-		victim := c.hot.hand()
+		victim := c.hot.head()
 		if victim == nil {
 			break
 		}
-		c.hot.advance()
+		c.hot.moveHand()
 		steps++
 
 		if victim.ref {
 			victim.ref = false
 		} else {
 			c.hot.remove(victim)
-			
+
 			if c.cold.size < c.coldCap {
 				victim.state = stateColdResident
 				victim.test = true
@@ -216,7 +241,7 @@ func (c *clock[K, V]) evictHot() *page[K, V] {
 
 func (c *clock[K, V]) trimMeta() {
 	for c.meta.size > c.metaCap {
-		victim := c.meta.hand()
+		victim := c.meta.head()
 		if victim == nil {
 			break
 		}
